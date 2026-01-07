@@ -1,0 +1,11 @@
+cdsapi==0.7.7
+# mamba_ssm==2.2.6.post3
+matplotlib==3.10.8
+numpy
+opencv_python==4.12.0.88
+pandas==2.3.3
+torch==2.5.1
+tqdm==4.67.1
+transformers==4.57.3
+workalendar==17.0.0
+xarray==2025.12.0
