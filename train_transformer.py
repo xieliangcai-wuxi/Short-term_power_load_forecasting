@@ -285,7 +285,8 @@ if __name__ == "__main__":
 
     preds = np.concatenate(test_preds_real, axis=0)
     trues = np.concatenate(test_trues_real, axis=0)
-
+    preds = np.squeeze(preds)
+    trues = np.squeeze(trues)
     # 保存预测结果
     np.savez(os.path.join(DATA_RECORD_DIR, 'test_results.npz'), preds=preds, trues=trues)
 
