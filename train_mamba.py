@@ -8,7 +8,9 @@ import os
 import sys
 import datetime
 from tqdm import tqdm
-
+import os
+os.environ["MAMBA_FORCE_PYTHON"] = "1"  # 强制禁用CUDA扩展，使用纯Python实现
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"  # 屏蔽无关的C++日志
 # ================= 1. 导入检查 =================
 try:
     # 尝试标准导入
