@@ -13,8 +13,7 @@ years = range(2008, 2019)
 AREA_COORDS = [42, -80, 38, -74]
 
 print(f"开始下载 {years[0]} 到 {years[-1]} 年的气象数据...")
-print("策略：每年保存为一个独立的 .nc 文件，防止网络中断导致前功尽弃。")
-
+# 每年保存为一个独立的 .nc 文件，防止网络中断导致前功尽弃
 for year in years:
     year_str = str(year)
     output_filename = f'download_weather_{year}.nc'
@@ -62,7 +61,6 @@ for year in years:
     except Exception as e:
         print(f"[{year_str}] 下载出错: {e}")
         # 这里可以选择 break 停止，或者 continue 尝试下一年
-        # 建议出错就停止，让你检查原因
         break
 
 print("所有任务处理完毕。")

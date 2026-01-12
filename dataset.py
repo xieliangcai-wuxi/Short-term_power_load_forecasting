@@ -1,8 +1,8 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset,DataLoader
 from transformers import AutoTokenizer
-from tqdm import tqdm # 引入进度条库
+from tqdm import tqdm 
 
 class MMTimeSeriesDataset(Dataset):
     def __init__(self, data_path, seq_len=168, pred_len=24, mode='train'):
@@ -21,10 +21,9 @@ class MMTimeSeriesDataset(Dataset):
         print("正在加载文本分词器...")
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
         
-        # === ⚡关键优化：一次性预处理所有文本 ===
-        print("正在预处理所有文本 (这可能需要几分钟，但会让训练飞快)...")
+        
+        print("正在预处理所有文本 ...")
         # 批量编码所有文本
-        # 注意：如果显存/内存不足，这里可以分批处理，但一般来说9万条文本不算多
         encoded_text = self.tokenizer(
             raw_text.tolist(),
             padding='max_length',

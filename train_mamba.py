@@ -11,17 +11,9 @@ from tqdm import tqdm
 import os
 os.environ["MAMBA_FORCE_PYTHON"] = "1"  # 强制禁用CUDA扩展，使用纯Python实现
 os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"  # 屏蔽无关的C++日志
-# ================= 1. 导入检查 =================
-try:
-    # 尝试标准导入
-    from model.MMMambaModel import MMMambaModel
-except ImportError:
-    # 兼容性导入：如果结构不同，尝试直接从文件导入
-    import model.MMMambaModel as MMMambaModel
-
+from model.MMMambaModel import MMMambaModel
 from dataset import MMTimeSeriesDataset
 
-# ================= 2. 日志与配置系统 (关键修改) =================
 
 # --- 基础配置 ---
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -49,7 +41,7 @@ for path in [MODEL_DIR, FIGURE_DIR, DATA_RECORD_DIR]:
 # 具体文件路径
 SAVE_PATH = os.path.join(MODEL_DIR, 'best_mm_mamba.pth')
 LOG_TXT_PATH = os.path.join(LOG_ROOT, 'training_log.txt')
-HISTORY_SAVE_PATH = os.path.join(DATA_RECORD_DIR, 'training_history.npz') # 关键：保存训练曲线数据
+HISTORY_SAVE_PATH = os.path.join(DATA_RECORD_DIR, 'training_history.npz')
 PLOT_RESULT_PATH = os.path.join(FIGURE_DIR, 'mamba_forecast_result.png')
 PLOT_LOSS_PATH = os.path.join(FIGURE_DIR, 'mamba_loss_curve.png')
 
@@ -68,9 +60,6 @@ class Logger(object):
         pass
 
 sys.stdout = Logger(LOG_TXT_PATH)
-
-# ================= 3. 工具函数 =================
-
 def inverse_transform(y_norm, stats):
     if torch.is_tensor(y_norm):
         y_norm = y_norm.cpu().detach().numpy()
@@ -85,7 +74,6 @@ def calculate_metrics_real(y_true_real, y_pred_real):
     mape = np.mean(np.abs((y_pred_real - y_true_real) / (y_true_real + 1.0))) * 100
     return rmse, mae, mape
 
-# ================= 4. 早停机制 =================
 class EarlyStopping:
     def __init__(self, patience=5, delta=0):
         self.patience = patience
@@ -115,7 +103,6 @@ class EarlyStopping:
         torch.save(model.state_dict(), path)
         self.best_loss = val_loss
 
-# ================= 5. 主程序 =================
 
 def seed_everything(seed=42):
     import random
@@ -129,7 +116,7 @@ def seed_everything(seed=42):
     torch.backends.cudnn.benchmark = False
 
 if __name__ == "__main__":
-    seed_everything(50) # 保持与 LSTM 相同的种子以便对比
+    seed_everything(50) 
 
     print("=" * 30)
     print(f"Model: Multimodal Mamba")
@@ -160,12 +147,9 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
 
     # --- C. 模型初始化 (Mamba) ---
-    try:
-        # 尝试实例化类
-        model = MMMambaModel.MMMambaModel(seq_len=168, pred_len=24).to(DEVICE)
-    except AttributeError:
-        # 如果导入的是类本身而不是模块
-        model = MMMambaModel(seq_len=168, pred_len=24).to(DEVICE)
+    
+    model = MMMambaModel.MMMambaModel(seq_len=168, pred_len=24).to(DEVICE)
+    
 
     criterion = nn.MSELoss() 
     optimizer = optim.Adam(model.parameters(), lr=LR)
@@ -254,7 +238,7 @@ if __name__ == "__main__":
             print("早停触发！停止训练。")
             break
 
-    # --- E. 保存训练过程数据 (关键：用于后续严谨对比) ---
+    # --- E. 保存训练过程数据---
     print(f"\n正在保存训练数据到: {HISTORY_SAVE_PATH}")
     np.savez(HISTORY_SAVE_PATH, 
              train_loss=np.array(history['train_loss']),

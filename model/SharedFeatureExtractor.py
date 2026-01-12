@@ -1,11 +1,6 @@
 import torch
 import torch.nn as nn
-# 导入官方库，保证科研严谨性
-
-# ==========================================
-# 1. 公共特征提取器 (Shared Feature Extractor)
-#    所有模型共用此模块，确保对比实验中"变量唯一"
-# ==========================================
+# 公共特征提取器 (Shared Feature Extractor)
 class SharedFeatureExtractor(nn.Module):
     def __init__(self, load_dim=1, img_channel=2, vocab_size=30522, embed_dim=32, fusion_dim=128):
         super().__init__()

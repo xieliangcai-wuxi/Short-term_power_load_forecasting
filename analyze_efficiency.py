@@ -118,7 +118,7 @@ if __name__ == "__main__":
     results.append(measure_model(lstm_model, "MM-LSTM"))
     results.append(measure_model(trans_model, "MM-Transformer"))
 
-    # 3. 生成论文表格
+    # 3. 生成表格
     df = pd.DataFrame(results)
     
     print("\n" + "="*80)
@@ -127,6 +127,6 @@ if __name__ == "__main__":
     print(df.to_string(index=False))
     print("="*80)
     
-    # 导出为 CSV 方便你画图
+    # 导出为 CSV 方便画图
     df.to_csv("efficiency_report.csv", index=False)
     print("\n结果已保存至 efficiency_report.csv")

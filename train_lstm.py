@@ -21,7 +21,7 @@ BATCH_SIZE = 64
 LR = 0.001
 EPOCHS = 50 
 PATIENCE = 5 
-DATA_PATH = './process_data/processed_data_10years.npz' 
+DATA_PATH = './process_data/processed_data_10years_v2.npz' 
 
 # --- 目录管理：所有内容统一保存到 ./log ---
 # 为了区分每次实验，建议加上时间戳，或者固定文件夹名称
@@ -63,8 +63,6 @@ class Logger(object):
 # 重定向 print
 sys.stdout = Logger(LOG_TXT_PATH)
 
-# ================= 1. 核心工具 =================
-
 def inverse_transform(y_norm, stats):
     """反归一化: Real = Norm * Std + Mean"""
     if torch.is_tensor(y_norm):
@@ -83,7 +81,6 @@ def calculate_metrics_real(y_true_real, y_pred_real):
     mape = np.mean(np.abs((y_pred_real - y_true_real) / (y_true_real + 1.0))) * 100
     return rmse, mae, mape
 
-# ================= 2. 早停机制 =================
 class EarlyStopping:
     def __init__(self, patience=5, delta=0):
         self.patience = patience
@@ -112,9 +109,6 @@ class EarlyStopping:
         print(f'   [CheckPoint] Val Loss 下降 ({self.best_loss:.6f} --> {val_loss:.6f}). 保存模型...')
         torch.save(model.state_dict(), path)
         self.best_loss = val_loss
-
-# ================= 3. 主程序 =================
-
 def seed_everything(seed=42):
     import random
     random.seed(seed)
@@ -282,7 +276,7 @@ if __name__ == "__main__":
     print(f"MAPE: {mape:.2f} %")
     print("-" * 35)
 
-    # === 绘图部分 (确保不阻塞，使用 savefig) ===
+    # === 绘图部分 ===
     # 切换 backend 防止服务器端报错
     plt.switch_backend('Agg') 
 

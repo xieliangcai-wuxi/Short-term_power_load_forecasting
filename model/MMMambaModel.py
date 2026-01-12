@@ -7,7 +7,7 @@ class MMMambaModel(nn.Module):
     def __init__(self, seq_len=168, pred_len=24, d_model=128, n_layers=2):
         super().__init__()
         
-        # 1. 特征提取器 (保持不变)
+        
         self.feature_extractor = SharedFeatureExtractor(fusion_dim=d_model)
         
         # 2. 配置 Hugging Face Mamba
@@ -36,8 +36,6 @@ class MMMambaModel(nn.Module):
         x = self.feature_extractor(x_load, x_img, x_text)
         
         # [Step 2] 输入 Mamba
-        # 关键点：Hugging Face 模型通常接受 input_ids (文本索引)
-        # 但我们这里通过 'inputs_embeds' 参数直接传入连续数值特征
         outputs = self.mamba(inputs_embeds=x)
         
         # outputs.last_hidden_state shape: [Batch, Seq, d_model]

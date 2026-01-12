@@ -250,7 +250,7 @@ if __name__ == "__main__":
             print("早停触发！停止训练。")
             break
 
-    # --- E. 保存训练过程数据 (关键) ---
+    # --- E. 保存训练过程数据---
     print(f"\n正在保存训练数据到: {HISTORY_SAVE_PATH}")
     np.savez(HISTORY_SAVE_PATH, 
              train_loss=np.array(history['train_loss']),
@@ -299,7 +299,7 @@ if __name__ == "__main__":
     print(f"MAPE: {mape:.2f} %")
     print("-" * 35)
 
-    # === 绘图 (切换 Backend) ===
+    # === 绘图 ===
     plt.switch_backend('Agg') 
 
     # 1. 预测对比
