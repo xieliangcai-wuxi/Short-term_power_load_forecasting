@@ -4,7 +4,7 @@ import numpy as np
 import cv2
 import os
 
-# ================= 配置路径 =================
+
 # 请确保这些文件名和你实际的文件名一致
 FILE_LOAD = './Historical_Load_Data_Modality/PJME_hourly.csv'
 FILE_WEATHER = './Cloud_Map_Temperature_Modaliity/download_weather_2018.nc'
@@ -51,7 +51,7 @@ ds = xr.open_dataset(FILE_WEATHER)
 if 'valid_time' in ds:
     ds = ds.rename({'valid_time': 'time'})
 
-# *** 关键：时区对齐 ***
+# 时区对齐
 # 气象数据的 time 也是 UTC，同样平移
 ds['time'] = ds['time'] + pd.Timedelta(hours=TIMEZONE_OFFSET)
 
@@ -60,7 +60,7 @@ ds['time'] = ds['time'] + pd.Timedelta(hours=TIMEZONE_OFFSET)
 ds_2018 = ds.sel(time=slice('2018-01-01', '2018-12-31'))
 print(f"   气象数据时间点: {len(ds_2018['time'])}")
 
-# ================= 4. 寻找公共交集 (Intersection) =================
+
 print("4. 执行时间对齐 (Intersection)...")
 
 # 找出三个数据源都存在的时间点
@@ -121,7 +121,7 @@ np.savez(OUTPUT_FILE,
          load=final_load, 
          images=final_images, 
          text=final_text,
-         times=common_index) # 把时间也存下来，画图用
+         times=common_index) # 把时间也存下来
 
 print("=== 数据准备全部完成！ ===")
 print(f"Load shape: {final_load.shape}")
