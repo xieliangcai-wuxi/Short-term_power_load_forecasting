@@ -1,108 +1,65 @@
+import os
+# --- Mamba 特有环境配置 (必须在 import torch 之前) ---
+os.environ["MAMBA_FORCE_PYTHON"] = "1"  # 根据你的环境需求保留
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 import sys
 import datetime
+import logging
 from tqdm import tqdm
-import os
-os.environ["MAMBA_FORCE_PYTHON"] = "1"  # 强制禁用CUDA扩展，使用纯Python实现
-os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"  # 屏蔽无关的C++日志
-from model.MMMambaModel import MMMambaModel
-from dataset import MMTimeSeriesDataset
 
+# 导入自定义模块
+try:
+    from model.MMMambaModel import MMMambaModel
+    from dataset import MMTimeSeriesDataset
+except ImportError:
+    # 路径兼容处理
+    from MMMambaModel import MMMambaModel
+    from dataset import MMTimeSeriesDataset
 
-# --- 基础配置 ---
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-BATCH_SIZE = 64
-LR = 0.001
-EPOCHS = 50 
-PATIENCE = 5 
-DATA_PATH = './process_data/processed_data_10years.npz' 
-
-# --- 目录管理：所有内容统一保存到 ./log ---
+# ==========================================
+# 1. 顶刊级日志与环境配置
+# ==========================================
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-# 这里的文件夹名特别标注了 mamba，方便区分
+# 明确标注 mamba，方便实验管理
 LOG_ROOT = f'./log/mamba_experiment_{TIMESTAMP}' 
-
-# 子文件夹路径
 MODEL_DIR = os.path.join(LOG_ROOT, 'models')
 FIGURE_DIR = os.path.join(LOG_ROOT, 'figures')
 DATA_RECORD_DIR = os.path.join(LOG_ROOT, 'data_records')
 
-# 自动创建文件夹
 for path in [MODEL_DIR, FIGURE_DIR, DATA_RECORD_DIR]:
-    if not os.path.exists(path):
-        os.makedirs(path)
+    os.makedirs(path, exist_ok=True)
 
-# 具体文件路径
+# --- 配置标准 Logger ---
+logger = logging.getLogger('MM-Mamba')
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# 文件日志
+file_handler = logging.FileHandler(os.path.join(LOG_ROOT, 'training_log.txt'), encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 控制台日志
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# --- 全局参数 ---
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+BATCH_SIZE = 32
+LR = 0.001
+EPOCHS = 50 
+PATIENCE = 7 
+# 注意：这里使用 v2 版本，确保包含 meta 信息
+DATA_PATH = './process_data/processed_data_10years_v2.npz' 
 SAVE_PATH = os.path.join(MODEL_DIR, 'best_mm_mamba.pth')
-LOG_TXT_PATH = os.path.join(LOG_ROOT, 'training_log.txt')
-HISTORY_SAVE_PATH = os.path.join(DATA_RECORD_DIR, 'training_history.npz')
-PLOT_RESULT_PATH = os.path.join(FIGURE_DIR, 'mamba_forecast_result.png')
-PLOT_LOSS_PATH = os.path.join(FIGURE_DIR, 'mamba_loss_curve.png')
-
-# --- 双向日志记录器 ---
-class Logger(object):
-    def __init__(self, filename):
-        self.terminal = sys.stdout
-        self.log = open(filename, "a", encoding='utf-8')
- 
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
-        self.log.flush()
- 
-    def flush(self):
-        pass
-
-sys.stdout = Logger(LOG_TXT_PATH)
-def inverse_transform(y_norm, stats):
-    if torch.is_tensor(y_norm):
-        y_norm = y_norm.cpu().detach().numpy()
-    mean = stats['mean']
-    std = stats['std']
-    y_real = y_norm * (std + 1e-5) + mean
-    return y_real
-
-def calculate_metrics_real(y_true_real, y_pred_real):
-    mae = np.mean(np.abs(y_pred_real - y_true_real))
-    rmse = np.sqrt(np.mean((y_pred_real - y_true_real) ** 2))
-    mape = np.mean(np.abs((y_pred_real - y_true_real) / (y_true_real + 1.0))) * 100
-    return rmse, mae, mape
-
-class EarlyStopping:
-    def __init__(self, patience=5, delta=0):
-        self.patience = patience
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.best_loss = np.inf
-        self.delta = delta
-
-    def __call__(self, val_loss, model, path):
-        score = -val_loss
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model, path)
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            print(f'   [EarlyStop] 计数: {self.counter} / {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model, path)
-            self.counter = 0
-
-    def save_checkpoint(self, val_loss, model, path):
-        print(f'   [CheckPoint] Val Loss 下降 ({self.best_loss:.6f} --> {val_loss:.6f}). 保存模型...')
-        torch.save(model.state_dict(), path)
-        self.best_loss = val_loss
-
 
 def seed_everything(seed=42):
     import random
@@ -110,62 +67,123 @@ def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# ==========================================
+# 2. 物理反归一化与指标工具 (与 LSTM 保持一致)
+# ==========================================
+class MetricTracker:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def inverse_transform(self, y_norm):
+        if torch.is_tensor(y_norm):
+            y_norm = y_norm.cpu().detach().numpy()
+        # 严格对齐归一化公式: Real = Norm * Std + Mean
+        return y_norm * self.std + self.mean
+
+    def calculate_metrics(self, y_true_real, y_pred_real):
+        # 物理量级计算 (IEEE 标准)
+        # 修正：移除了 +1.0，计算真实 MAPE
+        mae = np.mean(np.abs(y_pred_real - y_true_real))
+        rmse = np.sqrt(np.mean((y_pred_real - y_true_real) ** 2))
+        
+        # 处理分母极小值情况 (虽在负荷预测中罕见，但为了代码健壮性)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mape = np.mean(np.abs((y_pred_real - y_true_real) / y_true_real)) * 100
+            
+        return rmse, mae, mape
+
+# ==========================================
+# 3. 训练核心组件
+# ==========================================
+class EarlyStopping:
+    def __init__(self, patience=7, delta=0):
+        self.patience = patience
+        self.counter = 0
+        self.best_loss = np.inf
+        self.early_stop = False
+        self.delta = delta
+
+    def __call__(self, val_loss, model, path):
+        if val_loss < self.best_loss - self.delta:
+            self.best_loss = val_loss
+            self.save_checkpoint(model, path)
+            self.counter = 0
+        else:
+            self.counter += 1
+            logger.info(f'   [EarlyStop] Counter: {self.counter}/{self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+    def save_checkpoint(self, model, path):
+        logger.info(f'   [CheckPoint] Val Loss improved. Saving model...')
+        torch.save(model.state_dict(), path)
+
+# ==========================================
+# 4. 主程序流程
+# ==========================================
 if __name__ == "__main__":
-    seed_everything(50) 
+    seed_everything(50)
+    logger.info("=" * 60)
+    logger.info("MM-Mamba Multi-modal Forecasting Pipeline | IEEE Standard")
+    logger.info(f"Start Time: {datetime.datetime.now()}")
+    logger.info(f"Using Device: {DEVICE}")
+    logger.info("=" * 60)
 
-    print("=" * 30)
-    print(f"Model: Multimodal Mamba")
-    print(f"Time: {datetime.datetime.now()}")
-    print(f"Log Root: {LOG_ROOT}")
-    print("=" * 30)
-
-    # --- A. 加载数据 ---
+    # A. 数据加载与时间维度审计
     if not os.path.exists(DATA_PATH):
-        print(f"错误: 找不到文件 {DATA_PATH}")
-        exit()
-    
-    dataset = MMTimeSeriesDataset(DATA_PATH)
-    total_len = len(dataset)
-    stats = {'mean': dataset.load_mean, 'std': dataset.load_std}
-    print(f"数据统计量: Mean={stats['mean']:.4f}, Std={stats['std']:.4f}")
+        logger.error(f"Data file not found at {DATA_PATH}")
+        sys.exit()
 
-    # --- B. 划分 ---
-    train_size = int(total_len * 0.7)
-    val_size = int(total_len * 0.1)
-    
-    train_dataset = Subset(dataset, range(0, train_size))
-    val_dataset = Subset(dataset, range(train_size, train_size + val_size))
-    test_dataset = Subset(dataset, range(train_size + val_size, total_len))
+    # 加载数据集
+    train_set = MMTimeSeriesDataset(DATA_PATH, mode='train')
+    val_set = MMTimeSeriesDataset(DATA_PATH, mode='val')
+    test_set = MMTimeSeriesDataset(DATA_PATH, mode='test')
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
-
-    # --- C. 模型初始化 (Mamba) ---
+    # --- 时序审计 (Temporal Audit) ---
+    raw_data = np.load(DATA_PATH, allow_pickle=True)
+    times = raw_data['times']
+    total_len = len(times)
     
-    model = MMMambaModel.MMMambaModel(seq_len=168, pred_len=24).to(DEVICE)
+    # 对应 dataset 内部 80/10/10 的逻辑
+    train_end = int(total_len * 0.8)
+    val_end = int(total_len * 0.9)
     
+    logger.info(">>> Dataset Temporal & Statistical Audit <<<")
+    logger.info(f"Train Segment: {times[0]} to {times[train_end-1]} | Mean: {train_set.load_mean:.2f} | Std: {train_set.load_std:.2f}")
+    logger.info(f"Val Segment:   {times[train_end]} to {times[val_end-1]} | Mean: {val_set.load_mean:.2f} | Std: {val_set.load_std:.2f}")
+    logger.info(f"Test Segment:  {times[val_end]} to {times[-1]} | Mean: {test_set.load_mean:.2f} | Std: {test_set.load_std:.2f}")
+    logger.info("=" * 60)
 
-    criterion = nn.MSELoss() 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_set, batch_size=BATCH_SIZE, shuffle=False)
+
+    # 实例化追踪器 (使用训练集标尺)
+    tracker = MetricTracker(train_set.load_mean, train_set.load_std)
+
+    # B. 模型初始化
+    model = MMMambaModel(seq_len=168, pred_len=24).to(DEVICE)
+    
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-5) # 加上 weight_decay 防止过拟合
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
     early_stopping = EarlyStopping(patience=PATIENCE)
 
     history = {'train_loss': [], 'val_loss': [], 'val_mape': []}
 
-    # --- D. 训练循环 ---
-    print("\n=== 开始训练 Mamba 模型 ===")
+    # C. 训练循环
+    logger.info("\n>>> Starting Training Loop (Mamba) <<<")
     for epoch in range(EPOCHS):
         model.train()
-        train_loss = 0
-        loop = tqdm(train_loader, desc=f'Epoch {epoch+1}/{EPOCHS} [Train]', file=sys.stderr)
+        epoch_train_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", file=sys.stdout)
         
-        for batch in loop:
+        for batch in pbar:
             x_load = batch['x_load'].to(DEVICE, non_blocking=True)
             x_img = batch['x_img'].to(DEVICE, non_blocking=True)
             x_text = batch['x_text'].to(DEVICE, non_blocking=True)
@@ -174,8 +192,8 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             y_pred = model(x_load, x_img, x_text)
             
-            # --- 维度检查与修正 ---
-            # 如果 Mamba 输出是 (B, L, 1) 而 y_true 是 (B, L)，需要对齐
+            # --- Mamba 维度对齐检查 ---
+            # 如果 Mamba 输出是 (B, L) 而 y_true 是 (B, L, 1)，或者反之
             if y_pred.shape != y_true.shape:
                 if y_pred.dim() == 3 and y_pred.shape[-1] == 1:
                     y_pred = y_pred.squeeze(-1)
@@ -184,19 +202,16 @@ if __name__ == "__main__":
 
             loss = criterion(y_pred, y_true)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
             optimizer.step()
             
-            train_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
+            epoch_train_loss += loss.item()
+            pbar.set_postfix(train_mse=loss.item())
         
-        avg_train_loss = train_loss / len(train_loader)
-        
-        # --- Validation ---
+        # D. 验证环节
         model.eval()
-        val_loss = 0
-        val_preds_real = []
-        val_trues_real = []
+        epoch_val_loss = 0
+        all_val_preds, all_val_trues = [], []
         
         with torch.no_grad():
             for batch in val_loader:
@@ -214,47 +229,38 @@ if __name__ == "__main__":
                     elif y_true.dim() == 3 and y_true.shape[-1] == 1:
                         y_true = y_true.squeeze(-1)
                 
-                loss = criterion(y_pred, y_true)
-                val_loss += loss.item()
+                epoch_val_loss += criterion(y_pred, y_true).item()
                 
-                val_preds_real.append(inverse_transform(y_pred, stats))
-                val_trues_real.append(inverse_transform(y_true, stats))
+                all_val_preds.append(tracker.inverse_transform(y_pred))
+                all_val_trues.append(tracker.inverse_transform(y_true))
+
+        avg_train_loss = epoch_train_loss / len(train_loader)
+        avg_val_loss = epoch_val_loss / len(val_loader)
         
-        avg_val_loss = val_loss / len(val_loader)
-        
-        val_preds_real = np.concatenate(val_preds_real, axis=0)
-        val_trues_real = np.concatenate(val_trues_real, axis=0)
-        _, _, val_mape = calculate_metrics_real(val_trues_real, val_preds_real)
-        
-        print(f"Epoch [{epoch+1}/{EPOCHS}] | Train Loss: {avg_train_loss:.5f} | Val Loss: {avg_val_loss:.5f} | Val MAPE: {val_mape:.2f}%")
+        val_preds_mw = np.concatenate(all_val_preds, axis=0)
+        val_trues_mw = np.concatenate(all_val_trues, axis=0)
+        _, _, v_mape = tracker.calculate_metrics(val_trues_mw, val_preds_mw)
+
+        logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Summary: Train_MSE={avg_train_loss:.6f} | Val_MSE={avg_val_loss:.6f} | Val_MAPE={v_mape:.2f}%")
         
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
-        history['val_mape'].append(val_mape)
+        history['val_mape'].append(v_mape)
 
         scheduler.step(avg_val_loss)
         early_stopping(avg_val_loss, model, SAVE_PATH)
         if early_stopping.early_stop:
-            print("早停触发！停止训练。")
+            logger.info("Early stopping triggered.")
             break
 
-    # --- E. 保存训练过程数据---
-    print(f"\n正在保存训练数据到: {HISTORY_SAVE_PATH}")
-    np.savez(HISTORY_SAVE_PATH, 
-             train_loss=np.array(history['train_loss']),
-             val_loss=np.array(history['val_loss']),
-             val_mape=np.array(history['val_mape']))
-
-    # --- F. 最终测试 ---
-    print("\n=== 最终测试 (Test Set) ===")
+    # E. 最终测试评估
+    logger.info("\n" + "="*20 + " Final Test Performance " + "="*20)
     model.load_state_dict(torch.load(SAVE_PATH))
     model.eval()
 
-    test_preds_real = []
-    test_trues_real = []
-
+    test_preds, test_trues = [], []
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing", file=sys.stderr):
+        for batch in tqdm(test_loader, desc="Final Testing"):
             x_load = batch['x_load'].to(DEVICE)
             x_img = batch['x_img'].to(DEVICE)
             x_text = batch['x_text'].to(DEVICE)
@@ -269,71 +275,47 @@ if __name__ == "__main__":
                 elif y_true.dim() == 3 and y_true.shape[-1] == 1:
                     y_true = y_true.squeeze(-1)
 
-            test_preds_real.append(inverse_transform(y_pred, stats))
-            test_trues_real.append(inverse_transform(y_true, stats))
+            test_preds.append(tracker.inverse_transform(y_pred))
+            test_trues.append(tracker.inverse_transform(y_true))
 
-    preds = np.concatenate(test_preds_real, axis=0)
-    trues = np.concatenate(test_trues_real, axis=0)
-    preds = np.squeeze(preds)
-    trues = np.squeeze(trues)
-    # 保存预测结果
-    np.savez(os.path.join(DATA_RECORD_DIR, 'test_results.npz'), preds=preds, trues=trues)
+    final_preds = np.squeeze(np.concatenate(test_preds, axis=0))
+    final_trues = np.squeeze(np.concatenate(test_trues, axis=0))
 
-    rmse, mae, mape = calculate_metrics_real(trues, preds)
+    # 持久化
+    np.savez(os.path.join(DATA_RECORD_DIR, 'test_results.npz'), preds=final_preds, trues=final_trues)
 
-    print("-" * 35)
-    print(f"Mamba 测试集最终结果:")
-    print(f"RMSE: {rmse:.2f} MW")
-    print(f"MAE:  {mae:.2f} MW")
-    print(f"MAPE: {mape:.2f} %")
-    print("-" * 35)
+    rmse, mae, mape = tracker.calculate_metrics(final_trues, final_preds)
+    logger.info(f"Test RMSE: {rmse:.2f} MW")
+    logger.info(f"Test MAE:  {mae:.2f} MW")
+    logger.info(f"Test MAPE: {mape:.2f}%")
 
-    # === 绘图 (切换 Backend 防止报错) ===
+    # F. 绘图
     plt.switch_backend('Agg') 
-
-    # 1. 预测对比
-    sample_mapes = np.mean(np.abs((preds - trues) / (trues + 1.0)), axis=1) * 100
-    best_idx = np.argmin(sample_mapes)
-    worst_idx = np.argmax(sample_mapes)
-    random_idx = np.random.randint(0, len(preds))
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
-    axes[0].plot(trues[best_idx], label='Truth', color='black', linewidth=1.5)
-    axes[0].plot(preds[best_idx], label='Mamba', color='green', linestyle='--', linewidth=1.5)
-    axes[0].set_title(f'Mamba Best Case (MAPE: {sample_mapes[best_idx]:.2f}%)')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    # 1. 随机/最佳/最差样本对比
+    try:
+        # 避免除以0，这里仅用于找样本索引
+        sample_mapes = np.mean(np.abs((final_preds - final_trues) / (final_trues + 1e-5)), axis=1) * 100
+        best_idx = np.argmin(sample_mapes)
+        worst_idx = np.argmax(sample_mapes)
+        random_idx = np.random.randint(0, len(final_preds))
 
-    axes[1].plot(trues[random_idx], label='Truth', color='black', linewidth=1.5)
-    axes[1].plot(preds[random_idx], label='Mamba', color='blue', linestyle='--', linewidth=1.5)
-    axes[1].set_title(f'Mamba Random Case (MAPE: {sample_mapes[random_idx]:.2f}%)')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        titles = ['Best Case', 'Random Case', 'Worst Case']
+        indices = [best_idx, random_idx, worst_idx]
+        colors = ['green', 'blue', 'red']
 
-    axes[2].plot(trues[worst_idx], label='Truth', color='black', linewidth=1.5)
-    axes[2].plot(preds[worst_idx], label='Mamba', color='red', linestyle='--', linewidth=1.5)
-    axes[2].set_title(f'Mamba Worst Case (MAPE: {sample_mapes[worst_idx]:.2f}%)')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(PLOT_RESULT_PATH, dpi=300)
-    print(f"预测对比图已保存: {PLOT_RESULT_PATH}")
-    plt.close()
+        for i, ax in enumerate(axes):
+            idx = indices[i]
+            ax.plot(final_trues[idx], label='Truth', color='black', linewidth=1.5)
+            ax.plot(final_preds[idx], label='Mamba', color=colors[i], linestyle='--', linewidth=1.5)
+            ax.set_title(f'{titles[i]} (MAPE: {sample_mapes[idx]:.2f}%)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(FIGURE_DIR, 'mamba_forecast_result.png'), dpi=300)
+    except Exception as e:
+        logger.error(f"Plotting failed: {str(e)}")
 
-    # 2. Loss 曲线
-    plt.figure(figsize=(10, 6))
-    plt.plot(history['train_loss'], label='Train Loss', color='blue')
-    plt.plot(history['val_loss'], label='Val Loss', color='orange')
-    plt.title('Mamba Training Loss Curve')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.savefig(PLOT_LOSS_PATH, dpi=300)
-    print(f"Loss 曲线已保存: {PLOT_LOSS_PATH}")
-    plt.close()
-
-    print("\n所有任务完成。日志和数据已保存至:", LOG_ROOT)
+    logger.info(f"\nExperiment complete. Logs saved in: {LOG_ROOT}")

@@ -1,331 +1,251 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
 import os
 import sys
 import datetime
+import logging
 from tqdm import tqdm
 
-# 假设你的目录结构允许这样导入
-import model.MMLSTMModel as MMLSTMModel 
+# 导入自定义模块
+from model.MMLSTMModel import MMLSTMModel 
 from dataset import MMTimeSeriesDataset
 
-# ================= 0. 日志与配置系统 (关键修改) =================
-
-# --- 基础配置 ---
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-BATCH_SIZE = 64
-LR = 0.001
-EPOCHS = 50 
-PATIENCE = 5 
-DATA_PATH = './process_data/processed_data_10years_v2.npz' 
-
-# --- 目录管理：所有内容统一保存到 ./log ---
-# 为了区分每次实验，建议加上时间戳，或者固定文件夹名称
+# ==========================================
+# 1. 顶刊级日志与环境配置
+# ==========================================
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-LOG_ROOT = f'./log/lstm_experiment_{TIMESTAMP}' # 或者直接用 './log/lstm_v1'
-
-# 子文件夹路径
+LOG_ROOT = f'./log/lstm_experiment_{TIMESTAMP}'
 MODEL_DIR = os.path.join(LOG_ROOT, 'models')
 FIGURE_DIR = os.path.join(LOG_ROOT, 'figures')
 DATA_RECORD_DIR = os.path.join(LOG_ROOT, 'data_records')
 
-# 自动创建文件夹
 for path in [MODEL_DIR, FIGURE_DIR, DATA_RECORD_DIR]:
-    if not os.path.exists(path):
-        os.makedirs(path)
+    os.makedirs(path, exist_ok=True)
 
-# 具体文件路径
+# 配置 Logger
+logger = logging.getLogger('MM-LSTM')
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# 文件日志
+file_handler = logging.FileHandler(os.path.join(LOG_ROOT, 'training_log.txt'), encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# 控制台日志 (通过 Logger 重定向，替代 print)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# 全局配置
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+BATCH_SIZE = 64
+LR = 0.001
+EPOCHS = 50 
+PATIENCE = 7 
+DATA_PATH = './process_data/processed_data_10years_v2.npz' 
 SAVE_PATH = os.path.join(MODEL_DIR, 'best_mm_lstm.pth')
-LOG_TXT_PATH = os.path.join(LOG_ROOT, 'training_log.txt')
-HISTORY_SAVE_PATH = os.path.join(DATA_RECORD_DIR, 'training_history.npz') # 保存Loss数据用于后续对比
-PLOT_RESULT_PATH = os.path.join(FIGURE_DIR, 'lstm_forecast_result.png')
-PLOT_LOSS_PATH = os.path.join(FIGURE_DIR, 'lstm_loss_curve.png')
 
-# --- 双向日志记录器 (同时打印到控制台和文件) ---
-class Logger(object):
-    def __init__(self, filename):
-        self.terminal = sys.stdout
-        self.log = open(filename, "a", encoding='utf-8')
- 
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
-        self.log.flush() # 立即写入，防止崩溃丢失
- 
-    def flush(self):
-        # needed for python 3 compatibility
-        pass
-
-# 重定向 print
-sys.stdout = Logger(LOG_TXT_PATH)
-
-def inverse_transform(y_norm, stats):
-    """反归一化: Real = Norm * Std + Mean"""
-    if torch.is_tensor(y_norm):
-        y_norm = y_norm.cpu().detach().numpy()
-    
-    mean = stats['mean']
-    std = stats['std']
-    y_real = y_norm * (std + 1e-5) + mean
-    return y_real
-
-def calculate_metrics_real(y_true_real, y_pred_real):
-    """计算 RMSE, MAE, MAPE"""
-    mae = np.mean(np.abs(y_pred_real - y_true_real))
-    rmse = np.sqrt(np.mean((y_pred_real - y_true_real) ** 2))
-    # 防止分母为0
-    mape = np.mean(np.abs((y_pred_real - y_true_real) / (y_true_real + 1.0))) * 100
-    return rmse, mae, mape
-
-class EarlyStopping:
-    def __init__(self, patience=5, delta=0):
-        self.patience = patience
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.best_loss = np.inf
-        self.delta = delta
-
-    def __call__(self, val_loss, model, path):
-        score = -val_loss
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model, path)
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            print(f'   [EarlyStop] 计数: {self.counter} / {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model, path)
-            self.counter = 0
-
-    def save_checkpoint(self, val_loss, model, path):
-        print(f'   [CheckPoint] Val Loss 下降 ({self.best_loss:.6f} --> {val_loss:.6f}). 保存模型...')
-        torch.save(model.state_dict(), path)
-        self.best_loss = val_loss
 def seed_everything(seed=42):
     import random
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# ==========================================
+# 2. 物理反归一化与指标工具
+# ==========================================
+class MetricTracker:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def inverse_transform(self, y_norm):
+        if torch.is_tensor(y_norm):
+            y_norm = y_norm.cpu().detach().numpy()
+        return y_norm * self.std + self.mean
+
+    def calculate_metrics(self, y_true_real, y_pred_real):
+        # 物理量级计算 (IEEE 标准)
+        mae = np.mean(np.abs(y_pred_real - y_true_real))
+        rmse = np.sqrt(np.mean((y_pred_real - y_true_real) ** 2))
+        mape = np.mean(np.abs((y_pred_real - y_true_real) / y_true_real)) * 100
+        return rmse, mae, mape
+
+# ==========================================
+# 3. 训练核心组件
+# ==========================================
+class EarlyStopping:
+    def __init__(self, patience=7, delta=0):
+        self.patience = patience
+        self.counter = 0
+        self.best_loss = np.inf
+        self.early_stop = False
+        self.delta = delta
+
+    def __call__(self, val_loss, model, path):
+        if val_loss < self.best_loss - self.delta:
+            self.best_loss = val_loss
+            self.save_checkpoint(model, path)
+            self.counter = 0
+        else:
+            self.counter += 1
+            logger.info(f'   [EarlyStop] Counter: {self.counter}/{self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+    def save_checkpoint(self, model, path):
+        logger.info(f'   [CheckPoint] Val Loss improved. Saving model...')
+        torch.save(model.state_dict(), path)
+
+# ==========================================
+# 4. 主程序流程
+# ==========================================
 if __name__ == "__main__":
     seed_everything(50)
-    
-    # 打印配置信息到日志
-    print("=" * 30)
-    print(f"Time: {datetime.datetime.now()}")
-    print(f"Device: {DEVICE}")
-    print(f"Log Root: {LOG_ROOT}")
-    print("=" * 30)
+    logger.info("=" * 60)
+    logger.info("MM-LSTM Multi-modal Forecasting Pipeline | IEEE Standard")
+    logger.info(f"Start Time: {datetime.datetime.now()}")
+    logger.info(f"Using Device: {DEVICE}")
+    logger.info("=" * 60)
 
-    # --- A. 加载数据 ---
+    # A. 数据加载与时间维度审计
     if not os.path.exists(DATA_PATH):
-        print(f"错误: 找不到文件 {DATA_PATH}")
-        exit()
+        logger.error(f"Data file not found at {DATA_PATH}")
+        sys.exit()
+
+    # 加载数据集并打印严谨的时空信息
+    train_set = MMTimeSeriesDataset(DATA_PATH, mode='train')
+    val_set = MMTimeSeriesDataset(DATA_PATH, mode='val')
+    test_set = MMTimeSeriesDataset(DATA_PATH, mode='test')
+
+    # 获取 npz 里的原始时间戳进行审计 (假设 dataset 已经包含了这些 raw 数组)
+    # 这在论文中是证明实验严谨性（非重叠）的关键
+    raw_data = np.load(DATA_PATH, allow_pickle=True)
+    times = raw_data['times']
+    total_len = len(times)
     
-    dataset = MMTimeSeriesDataset(DATA_PATH)
-    total_len = len(dataset)
-    stats = {'mean': dataset.load_mean, 'std': dataset.load_std}
-    print(f"数据统计量: Mean={stats['mean']:.4f}, Std={stats['std']:.4f}")
-
-    # --- B. 划分 ---
-    train_size = int(total_len * 0.7)
-    val_size = int(total_len * 0.1)
+    # 打印时间维度信息 (对应 dataset 内部 80/10/10 的逻辑)
+    train_end = int(total_len * 0.8)
+    val_end = int(total_len * 0.9)
     
-    train_dataset = Subset(dataset, range(0, train_size))
-    val_dataset = Subset(dataset, range(train_size, train_size + val_size))
-    test_dataset = Subset(dataset, range(train_size + val_size, total_len))
+    logger.info(">>> Dataset Temporal & Statistical Audit <<<")
+    logger.info(f"Train Segment: {times[0]} to {times[train_end-1]} | Mean: {train_set.load_mean:.2f} | Std: {train_set.load_std:.2f}")
+    logger.info(f"Val Segment:   {times[train_end]} to {times[val_end-1]} | Mean: {val_set.load_mean:.2f} | Std: {val_set.load_std:.2f}")
+    logger.info(f"Test Segment:  {times[val_end]} to {times[-1]} | Mean: {test_set.load_mean:.2f} | Std: {test_set.load_std:.2f}")
+    logger.info(f"Total alignment length: {total_len} hourly samples.")
+    logger.info("=" * 60)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_set, batch_size=BATCH_SIZE, shuffle=False)
 
-    # --- C. 模型初始化 ---
-    try:
-        model = MMLSTMModel.MMLSTMModel(seq_len=168, pred_len=24).to(DEVICE)
-    except AttributeError:
-        model = MMLSTMModel(seq_len=168, pred_len=24).to(DEVICE)
-        
-    criterion = nn.MSELoss() 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    # 实例化追踪器 (修复之前的属性错误)
+    tracker = MetricTracker(train_set.load_mean, train_set.load_std)
+
+    # B. 模型初始化
+    model = MMLSTMModel(seq_len=168, pred_len=24).to(DEVICE)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
     early_stopping = EarlyStopping(patience=PATIENCE)
 
-    # 记录字典
     history = {'train_loss': [], 'val_loss': [], 'val_mape': []}
 
-    # --- D. 训练循环 ---
-    print("\n=== 开始训练 LSTM 模型 ===")
+    # C. 训练循环
+    logger.info("\n>>> Starting Training Loop <<<")
     for epoch in range(EPOCHS):
         model.train()
-        train_loss = 0
-        # Tqdm output directed to stderr, won't clutter the log file too much if handled well
-        loop = tqdm(train_loader, desc=f'Epoch {epoch+1}/{EPOCHS} [Train]', file=sys.stderr)
+        epoch_train_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", file=sys.stdout)
         
-        for batch in loop:
-            x_load = batch['x_load'].to(DEVICE, non_blocking=True)
-            x_img = batch['x_img'].to(DEVICE, non_blocking=True)
-            x_text = batch['x_text'].to(DEVICE, non_blocking=True)
-            y_true = batch['y_load'].to(DEVICE, non_blocking=True)
-            
-            optimizer.zero_grad()
-            y_pred = model(x_load, x_img, x_text)
-            loss = criterion(y_pred, y_true)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
-            
-            train_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
-        
-        avg_train_loss = train_loss / len(train_loader)
-        
-        # --- Validation ---
-        model.eval()
-        val_loss = 0
-        val_preds_real = []
-        val_trues_real = []
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                x_load = batch['x_load'].to(DEVICE)
-                x_img = batch['x_img'].to(DEVICE)
-                x_text = batch['x_text'].to(DEVICE)
-                y_true = batch['y_load'].to(DEVICE)
-                
-                y_pred = model(x_load, x_img, x_text)
-                loss = criterion(y_pred, y_true)
-                val_loss += loss.item()
-                
-                val_preds_real.append(inverse_transform(y_pred, stats))
-                val_trues_real.append(inverse_transform(y_true, stats))
-        
-        avg_val_loss = val_loss / len(val_loader)
-        
-        # 拼接并计算指标
-        val_preds_real = np.concatenate(val_preds_real, axis=0)
-        val_trues_real = np.concatenate(val_trues_real, axis=0)
-        _, _, val_mape = calculate_metrics_real(val_trues_real, val_preds_real)
-        
-        # 记录并打印
-        print(f"Epoch [{epoch+1}/{EPOCHS}] | Train Loss: {avg_train_loss:.5f} | Val Loss: {avg_val_loss:.5f} | Val MAPE: {val_mape:.2f}%")
-        
-        history['train_loss'].append(avg_train_loss)
-        history['val_loss'].append(avg_val_loss)
-        history['val_mape'].append(val_mape)
-
-        scheduler.step(avg_val_loss)
-        early_stopping(avg_val_loss, model, SAVE_PATH)
-        
-        if early_stopping.early_stop:
-            print("早停触发！停止训练。")
-            break
-
-    # --- E. 保存训练数据 (重要：用于后续对比) ---
-    print(f"\n正在保存训练历史数据到: {HISTORY_SAVE_PATH}")
-    np.savez(HISTORY_SAVE_PATH, 
-             train_loss=np.array(history['train_loss']),
-             val_loss=np.array(history['val_loss']),
-             val_mape=np.array(history['val_mape']))
-
-    # --- F. 最终测试与绘图 ---
-    print("\n=== 最终测试 (Test Set) ===")
-    model.load_state_dict(torch.load(SAVE_PATH))
-    model.eval()
-
-    test_preds_real = []
-    test_trues_real = []
-
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing", file=sys.stderr):
+        for batch in pbar:
             x_load = batch['x_load'].to(DEVICE)
             x_img = batch['x_img'].to(DEVICE)
             x_text = batch['x_text'].to(DEVICE)
             y_true = batch['y_load'].to(DEVICE)
-            y_pred = model(x_load, x_img, x_text)
             
-            test_preds_real.append(inverse_transform(y_pred, stats))
-            test_trues_real.append(inverse_transform(y_true, stats))
+            optimizer.zero_grad()
+            y_pred = model(x_load, x_img, x_text) 
+            loss = criterion(y_pred, y_true)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            epoch_train_loss += loss.item()
+            pbar.set_postfix(train_mse=loss.item())
 
-    preds = np.concatenate(test_preds_real, axis=0)
-    trues = np.concatenate(test_trues_real, axis=0)
-    preds = np.squeeze(preds)
-    trues = np.squeeze(trues)
+        # D. 验证环节
+        model.eval()
+        epoch_val_loss = 0
+        all_val_preds, all_val_trues = [], []
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                x_load, x_img, x_text, y_true = batch['x_load'].to(DEVICE), batch['x_img'].to(DEVICE), batch['x_text'].to(DEVICE), batch['y_load'].to(DEVICE)
+                y_pred = model(x_load, x_img, x_text)
+                epoch_val_loss += criterion(y_pred, y_true).item()
+                
+                all_val_preds.append(tracker.inverse_transform(y_pred))
+                all_val_trues.append(tracker.inverse_transform(y_true))
 
-    # 保存预测结果（可选，为了后续画更精细的图）
-    np.savez(os.path.join(DATA_RECORD_DIR, 'test_results.npz'), preds=preds, trues=trues)
+        avg_train_loss = epoch_train_loss / len(train_loader)
+        avg_val_loss = epoch_val_loss / len(val_loader)
+        
+        val_preds_mw = np.concatenate(all_val_preds, axis=0)
+        val_trues_mw = np.concatenate(all_val_trues, axis=0)
+        _, _, v_mape = tracker.calculate_metrics(val_trues_mw, val_preds_mw)
 
-    rmse, mae, mape = calculate_metrics_real(trues, preds)
+        logger.info(f"Epoch [{epoch+1}/{EPOCHS}] Summary: Train_MSE={avg_train_loss:.6f} | Val_MSE={avg_val_loss:.6f} | Val_MAPE={v_mape:.2f}%")
+        
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['val_mape'].append(v_mape)
 
-    print("-" * 35)
-    print(f"LSTM 测试集最终结果:")
-    print(f"RMSE: {rmse:.2f} MW")
-    print(f"MAE:  {mae:.2f} MW")
-    print(f"MAPE: {mape:.2f} %")
-    print("-" * 35)
+        scheduler.step(avg_val_loss)
+        early_stopping(avg_val_loss, model, SAVE_PATH)
+        if early_stopping.early_stop: 
+            logger.info("Early stopping triggered.")
+            break
 
-    # === 绘图部分 ===
-    # 切换 backend 防止服务器端报错
-    plt.switch_backend('Agg') 
-
-    # 1. 结果对比图
-    sample_mapes = np.mean(np.abs((preds - trues) / (trues + 1.0)), axis=1) * 100
-    best_idx = np.argmin(sample_mapes)
-    worst_idx = np.argmax(sample_mapes)
-    random_idx = np.random.randint(0, len(preds))
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    # E. 最终测试评估
+    logger.info("\n" + "="*20 + " Final Test Performance " + "="*20)
+    model.load_state_dict(torch.load(SAVE_PATH))
+    model.eval()
     
-    # Best
-    axes[0].plot(trues[best_idx], label='Truth', color='black', linewidth=1.5)
-    axes[0].plot(preds[best_idx], label='LSTM', color='green', linestyle='--', linewidth=1.5)
-    axes[0].set_title(f'Best Case (MAPE: {sample_mapes[best_idx]:.2f}%)')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    test_preds, test_trues = [], []
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Final Testing"):
+            x_load, x_img, x_text, y_true = batch['x_load'].to(DEVICE), batch['x_img'].to(DEVICE), batch['x_text'].to(DEVICE), batch['y_load'].to(DEVICE)
+            y_pred = model(x_load, x_img, x_text)
+            test_preds.append(tracker.inverse_transform(y_pred))
+            test_trues.append(tracker.inverse_transform(y_true))
 
-    # Random
-    axes[1].plot(trues[random_idx], label='Truth', color='black', linewidth=1.5)
-    axes[1].plot(preds[random_idx], label='LSTM', color='blue', linestyle='--', linewidth=1.5)
-    axes[1].set_title(f'Random Case (MAPE: {sample_mapes[random_idx]:.2f}%)')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    final_preds = np.squeeze(np.concatenate(test_preds, axis=0))
+    final_trues = np.squeeze(np.concatenate(test_trues, axis=0))
 
-    # Worst
-    axes[2].plot(trues[worst_idx], label='Truth', color='black', linewidth=1.5)
-    axes[2].plot(preds[worst_idx], label='LSTM', color='red', linestyle='--', linewidth=1.5)
-    axes[2].set_title(f'Worst Case (MAPE: {sample_mapes[worst_idx]:.2f}%)')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
+    rmse, mae, mape = tracker.calculate_metrics(final_trues, final_preds)
+    logger.info(f"Test RMSE: {rmse:.2f} MW")
+    logger.info(f"Test MAE:  {mae:.2f} MW")
+    logger.info(f"Test MAPE: {mape:.2f}%")
+
+    # F. 持久化与绘图
+    np.savez(os.path.join(DATA_RECORD_DIR, 'test_results.npz'), preds=final_preds, trues=final_trues)
     
-    plt.tight_layout()
-    plt.savefig(PLOT_RESULT_PATH, dpi=300)
-    print(f"预测对比图已保存: {PLOT_RESULT_PATH}")
-    plt.close() 
-
-    # 2. Loss 曲线
-    plt.figure(figsize=(10, 6))
-    plt.plot(history['train_loss'], label='Train Loss', color='blue')
-    plt.plot(history['val_loss'], label='Val Loss', color='orange')
-    plt.title('Training Loss Curve')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    plt.switch_backend('Agg')
+    plt.figure(figsize=(12, 6))
+    plt.plot(final_trues[0], label='Actual Load', color='black', alpha=0.8)
+    plt.plot(final_preds[0], label='Predicted (MM-LSTM)', color='red', linestyle='--')
+    plt.title(f"24-Hour Horizon Forecasting | MAPE: {mape:.2f}%")
+    plt.legend(); plt.grid(True)
+    plt.savefig(os.path.join(FIGURE_DIR, 'test_sample_compare.png'), dpi=300)
     
-    plt.savefig(PLOT_LOSS_PATH, dpi=300)
-    print(f"Loss 曲线已保存: {PLOT_LOSS_PATH}")
-    plt.close()
-
-    print("\n所有任务完成。日志和数据已保存至:", LOG_ROOT)
+    logger.info(f"\nExperiment complete. Data saved in: {LOG_ROOT}")

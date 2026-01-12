@@ -1,47 +1,64 @@
 import numpy as np
 import torch
-from torch.utils.data import Dataset,DataLoader
+from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
-from tqdm import tqdm 
+import os
 
 class MMTimeSeriesDataset(Dataset):
     def __init__(self, data_path, seq_len=168, pred_len=24, mode='train'):
+        """
+        mode: 'train', 'val', 'test'
+        """
         # 1. 读取 .npz 数据
         data = np.load(data_path, allow_pickle=True)
-        self.load = data['load'].astype(np.float32)
-        if self.load.ndim > 1: self.load = self.load.flatten()
+        raw_load = data['load'].astype(np.float32)
+        raw_images = data['images'].astype(np.float32)
+        raw_text_list = data['text']
         
-        self.images = data['images'].astype(np.float32)
-        raw_text = data['text'] # 所有原始文本
+        # 获取我们之前存入的训练集标尺 (Anti-Leakage)
+        meta = data['meta'].item()
+        self.load_mean = meta['train_mean']
+        self.load_std = meta['train_std']
+        
+        # 2. 严格的时间轴切分 (必须在归一化前确定范围)
+        total_len = len(raw_load)
+        train_end = int(total_len * 0.8)
+        val_end = int(total_len * 0.9)
+        
+        if mode == 'train':
+            start_p, end_p = 0, train_end
+        elif mode == 'val':
+            start_p, end_p = train_end, val_end
+        else: # test
+            start_p, end_p = val_end, total_len
+            
+        # 截取对应片段
+        self.load = raw_load[start_p:end_p]
+        self.images = raw_images[start_p:end_p]
+        self.mode_text = raw_text_list[start_p:end_p]
         
         self.seq_len = seq_len
         self.pred_len = pred_len
-        
-        # 2. 初始化分词器
-        print("正在加载文本分词器...")
+
+        # 3. 初始化分词器并预处理文本
+        # 注意：为了节省内存和时间，我们只处理当前 mode 需要的文本
+        print(f"正在加载 [{mode}] 文本分词器及预处理...")
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-        
-        
-        print("正在预处理所有文本 ...")
-        # 批量编码所有文本
         encoded_text = self.tokenizer(
-            raw_text.tolist(),
+            self.mode_text.tolist(),
             padding='max_length',
             truncation=True,
             max_length=32,
             return_tensors="pt"
         )
-        self.text_ids = encoded_text['input_ids'] # [Total_Len, 32]
-        print("文本预处理完成。")
-        # ========================================
+        self.text_ids = encoded_text['input_ids'] 
 
-        # 3. 归一化
-        self.load_mean = np.mean(self.load)
-        self.load_std = np.std(self.load)
+        # 4. 使用【训练集标尺】进行归一化 (核心严谨点)
         self.load_norm = (self.load - self.load_mean) / (self.load_std + 1e-5)
         
+        # 计算该模式下可生成的滑动窗口数量
         self.n_samples = len(self.load) - (seq_len + pred_len) + 1
-        print(f"数据集加载完成! 共有 {self.n_samples} 个样本。")
+        print(f"[{mode}] 数据集加载完成! 共有 {self.n_samples} 个样本。")
 
     def __len__(self):
         return self.n_samples
@@ -52,44 +69,20 @@ class MMTimeSeriesDataset(Dataset):
         r_begin = s_end
         r_end = r_begin + self.pred_len
         
-        # A. 负荷
+        # A. 负荷 [seq_len, 1]
         seq_x = self.load_norm[s_begin:s_end] 
         seq_y = self.load_norm[r_begin:r_end]
         
-        # B. 图像
+        # B. 图像序列 [seq_len, 2, 32, 32] -> 适配方案 A
+        # 这里取完整的 168 步图像
         img_x = self.images[s_begin:s_end]
         
-        # C. 文本 (⚡现在直接切片取 Tensor，速度极快)
+        # C. 文本序列 [seq_len, 32]
         text_x = self.text_ids[s_begin:s_end] 
         
         return {
             'x_load': torch.tensor(seq_x, dtype=torch.float32).unsqueeze(-1),
             'x_img': torch.tensor(img_x, dtype=torch.float32),
-            'x_text': text_x, # 已经是 Tensor 了
+            'x_text': text_x, 
             'y_load': torch.tensor(seq_y, dtype=torch.float32).unsqueeze(-1)
         }
-
-# ================= 测试代码 =================
-if __name__ == "__main__":
-    # 实例化数据集
-    dataset = MMTimeSeriesDataset('./processed_data_final.npz')
-    
-    # 建立 DataLoader (模拟训练时的批量读取)
-    # batch_size=4: 一次取4个样本
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-    
-    # 取出一组看看形状
-    batch = next(iter(dataloader))
-    
-    print("\n=== 数据形状检查 ===")
-    print(f"Input Load Shape: {batch['x_load'].shape}") 
-    # 预期: [4, 168, 1] -> [Batch, Time, Feature]
-    
-    print(f"Input Image Shape: {batch['x_img'].shape}") 
-    # 预期: [4, 168, 2, 32, 32] -> [Batch, Time, Channel, H, W]
-    
-    print(f"Input Text Shape: {batch['x_text'].shape}") 
-    # 预期: [4, 168, 32] -> [Batch, Time, Token_Len]
-    
-    print(f"Target Load Shape: {batch['y_load'].shape}") 
-    # 预期: [4, 24, 1]
