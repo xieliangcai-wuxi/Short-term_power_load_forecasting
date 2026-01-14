@@ -58,7 +58,7 @@ logger.addHandler(console_handler)
 
 # ===================== 全局超参数 & 常量配置（统一管理）=====================
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'  # 硬件设备：优先使用GPU加速
-BATCH_SIZE = 64          # 批次大小：显存充足可增大，过小会导致训练震荡
+BATCH_SIZE = 32          # 批次大小：显存充足可增大，过小会导致训练震荡
 LR = 0.001               # 初始学习率
 EPOCHS = 50              # 最大训练轮数
 PATIENCE = 7             # 早停耐心值：验证集loss连续7轮不下降则停止训练
